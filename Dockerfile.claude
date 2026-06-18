@@ -1,0 +1,40 @@
+FROM fedora:44
+
+ENV SDKMAN_DIR=/usr/local/sdkman
+
+# 1. Install system utilities, development tools, and GitHub CLI natively via dnf
+RUN dnf update -y && dnf install -y \
+    curl \
+    git \
+    unzip \
+    zip \
+    procps \
+    openssh-clients \
+    make \
+    gcc \
+    gcc-c++ \
+    gh \
+    && dnf clean all
+
+# 2. Install SDKMAN! and the JVM Ecosystem (Java 25 LTS, Kotlin, Scala, sbt)
+RUN curl -s "https://get.sdkman.io" | bash
+RUN bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && \
+    sdk install java 25.0.3-tem && \
+    sdk install kotlin 1.9.22 && \
+    sdk install scala 3.3.1 && \
+    sdk install sbt 1.9.8"
+
+# 3. Expose JVM runtimes to the global environment path
+ENV PATH="${SDKMAN_DIR}/candidates/java/current/bin:${SDKMAN_DIR}/candidates/kotlin/current/bin:${SDKMAN_DIR}/candidates/scala/current/bin:${SDKMAN_DIR}/candidates/sbt/current/bin:${PATH}"
+
+# 4. Install Claude Code using the standalone native installer script
+RUN curl -fsSL https://claude.ai/install.sh | bash
+
+# Ensure Claude is mapped into the global path (it drops into /root/.local/bin by default)
+ENV PATH="/root/.local/bin:${PATH}"
+
+# Create mount targets for credential files
+RUN mkdir -p /root/.claude /root/.config/gh
+
+WORKDIR /workspace
+CMD ["/bin/bash"]
