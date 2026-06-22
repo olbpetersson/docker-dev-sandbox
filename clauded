@@ -1,61 +1,97 @@
 #!/usr/bin/env bash
 
-# Exit immediately if a command exits with a non-zero status
+# clauded — run Claude Code in an isolated Docker sandbox
+# Usage: clauded [--no-gh] [--safe] [--rebuild] [claude args...]
+#
+#   --no-gh     skip GitHub CLI auth injection
+#   --safe      run Claude with normal permission prompts (default: full-auto)
+#   --rebuild   force a docker image rebuild before starting
+
 set -e
 
-# Ensure local host config directory exists for Claude's web SSO session
-mkdir -p "$HOME/.claude"
+# ── Locate the repo directory even when invoked via a symlink on PATH ──────────
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
-# Check if --no-gh was passed as an argument
+# ── Parse our own flags; accumulate everything else for claude ─────────────────
 SKIP_GH=false
+SAFE_MODE=false
+REBUILD=false
 FORWARD_ARGS=()
 
 for arg in "$@"; do
-    if [ "$arg" = "--no-gh" ]; then
-        SKIP_GH=true
-    else
-        FORWARD_ARGS+=("$arg")
-    fi
+    case "$arg" in
+        --no-gh)   SKIP_GH=true ;;
+        --safe)    SAFE_MODE=true ;;
+        --rebuild) REBUILD=true ;;
+        *)         FORWARD_ARGS+=("$arg") ;;
+    esac
 done
 
-# Generate readable, collision-free container naming
+# ── Build the image if it's missing or --rebuild was requested ─────────────────
+if [ "$REBUILD" = true ] || ! docker image inspect claude-sandbox:latest > /dev/null 2>&1; then
+    echo "🔨 Building claude-sandbox:latest …"
+    docker build -f "$SCRIPT_DIR/Dockerfile.claude" -t claude-sandbox:latest "$SCRIPT_DIR"
+fi
+
+# ── Generate a readable, collision-free container name from the cwd ────────────
 DIR_NAME=$(basename "$(pwd)")
 DIR_HASH=$(echo -n "$(pwd)" | md5sum | cut -c 1-8)
 CONTAINER_NAME="${DIR_NAME}-${DIR_HASH}-sandbox"
 
-# Conditional GitHub CLI Authentication Check
+# ── On --rebuild, stop and remove any running container so the new image is used
+if [ "$REBUILD" = true ]; then
+    if [ -n "$(docker ps -q -f "name=^/${CONTAINER_NAME}$")" ]; then
+        docker rm -f "$CONTAINER_NAME" > /dev/null
+    fi
+fi
+
+# ── Conditional GitHub CLI authentication ─────────────────────────────────────
 ACTIVE_GH_TOKEN=""
 if [ "$SKIP_GH" = false ]; then
-    # Grab token; don't let a missing token trigger 'set -e' failure
     ACTIVE_GH_TOKEN=$(gh auth token 2>/dev/null || true)
-
     if [ -z "$ACTIVE_GH_TOKEN" ]; then
-        echo "❌ Error: Your host machine is not logged into the GitHub CLI."
-        echo "Please run 'gh auth login' on your host first, or use: claude-box --no-gh"
+        echo "❌  Error: not logged into the GitHub CLI on the host."
+        echo "Run 'gh auth login' first, or skip with: clauded --no-gh"
         exit 1
     fi
 fi
 
-# Boot the container if it's not already running
-if ! docker ps -q -f name="^/${CONTAINER_NAME}$" > /dev/null; then
-    if docker ps -aq -f name="^/${CONTAINER_NAME}$" > /dev/null; then
+# ── Boot the container if it's not already running ────────────────────────────
+if ! docker ps -q -f "name=^/${CONTAINER_NAME}$" > /dev/null 2>&1 || \
+   [ -z "$(docker ps -q -f "name=^/${CONTAINER_NAME}$")" ]; then
+
+    # Remove any stopped container with the same name
+    if [ -n "$(docker ps -aq -f "name=^/${CONTAINER_NAME}$")" ]; then
         docker rm "$CONTAINER_NAME" > /dev/null
     fi
 
-    # Build our base docker run arguments array
+    # Build docker run options array
     DOCKER_RUN_OPTS=(
         -d
         --name "$CONTAINER_NAME"
         --cap-drop=ALL
         --security-opt=no-new-privileges:true
-        -v "$(pwd):/workspace:Z"
-        -v "$HOME/.claude:/root/.claude:ro,Z"
-        -v "$HOME/.gitconfig:/root/.gitconfig:ro,Z"
+        # Read-only root FS — only the explicit mounts below are writable
+        --read-only
+        # Writable scratch space for compilers, npm, etc.
+        --tmpfs /tmp:exec,mode=1777
+        # Writable HOME (tmpfs, owned by the runtime uid) — dotfiles that
+        # aren't explicitly mounted below land here ephemerally
+        --tmpfs "/home/sandbox:exec,uid=$(id -u),gid=$(id -g),mode=0700"
         --user "$(id -u):$(id -g)"
-        -e HOME=/root
+        -e HOME=/home/sandbox
+        # Mount only the current repo — host home is invisible
+        -v "$(pwd):/workspace:z"
+        # Share the real ~/.claude dir read-write so Claude reuses the existing
+        # login and persists sessions/history back to the host
+        # NOTE: :z (shared SELinux relabel) keeps the host's own Claude functional
+        -v "$HOME/.claude:/home/sandbox/.claude:z"
+        # ~/.claude.json (main onboarding config, lives in $HOME not inside .claude/)
+        -v "$HOME/.claude.json:/home/sandbox/.claude.json:z"
+        # Git identity — read-only
+        -v "$HOME/.gitconfig:/home/sandbox/.gitconfig:ro,z"
     )
 
-    # Only inject the token if we didn't explicitly bypass it
     if [ "$SKIP_GH" = false ]; then
         DOCKER_RUN_OPTS+=(-e GH_TOKEN="$ACTIVE_GH_TOKEN")
     fi
@@ -63,6 +99,17 @@ if ! docker ps -q -f name="^/${CONTAINER_NAME}$" > /dev/null; then
     docker run "${DOCKER_RUN_OPTS[@]}" claude-sandbox:latest tail -f /dev/null > /dev/null
 fi
 
-# Execute inside the container transparently using filtered arguments
-# Using exec here replaces the current script process entirely with the docker command
-exec docker exec -it "$CONTAINER_NAME" claude "${FORWARD_ARGS[@]}"
+# ── Ensure Claude's self-check symlink exists in the writable HOME tmpfs ────────
+# Claude Code checks for itself at $HOME/.local/bin/claude on startup and warns
+# if absent. HOME is a fresh tmpfs on every container boot, so we create the
+# symlink here (idempotent; points at the fixed install path set in Dockerfile).
+docker exec "$CONTAINER_NAME" \
+    bash -c 'mkdir -p ~/.local/bin && ln -sf /usr/local/bin/claude ~/.local/bin/claude' \
+    2>/dev/null || true
+
+# ── Exec into the container ────────────────────────────────────────────────────
+if [ "$SAFE_MODE" = true ]; then
+    exec docker exec -it "$CONTAINER_NAME" claude "${FORWARD_ARGS[@]}"
+else
+    exec docker exec -it "$CONTAINER_NAME" claude --dangerously-skip-permissions "${FORWARD_ARGS[@]}"
+fi
