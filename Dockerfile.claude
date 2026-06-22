@@ -4,6 +4,7 @@ FROM fedora:44
 RUN dnf update -y && dnf install -y \
     curl \
     git \
+    jq \
     unzip \
     zip \
     procps-ng \
