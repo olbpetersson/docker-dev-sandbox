@@ -1,11 +1,25 @@
 #!/usr/bin/env bash
 
 # clauded — run Claude Code in an isolated Docker sandbox
-# Usage: clauded [--no-gh] [--safe] [--rebuild] [claude args...]
+# Usage: clauded [--no-gh] [--safe] [--rebuild] [--lockdown] [claude args...]
 #
 #   --no-gh     skip GitHub CLI auth injection
 #   --safe      run Claude with normal permission prompts (default: auto-mode)
 #   --rebuild   force a docker image rebuild before starting
+#   --lockdown  route all container egress through an allowlist proxy;
+#               the container gets no direct internet route (--internal network)
+#   --no-limits disable all resource limits (pids, memory, cpu); useful when
+#               the defaults are too tight for an unusually heavy workload
+#
+# Resource limits (overridable via env vars, ignored under --no-limits):
+#   CLAUDED_PIDS_LIMIT  max processes/threads  (default: 4096)
+#   CLAUDED_MEMORY      memory cap             (default: 8g)
+#   CLAUDED_CPUS        CPU quota              (default: 8)
+#
+# Lockdown proxy (shared across all lockdown sandboxes):
+#   Network:   claude-egress  (--internal Docker network)
+#   Proxy:     claude-egress-proxy  (Squid, dual-homed)
+#   Allowlist: egress-allowlist.conf  (in this repo, mounted into the proxy)
 
 set -e
 
@@ -16,14 +30,18 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 SKIP_GH=false
 SAFE_MODE=false
 REBUILD=false
+LOCKDOWN=false
+NO_LIMITS=false
 FORWARD_ARGS=()
 
 for arg in "$@"; do
     case "$arg" in
-        --no-gh)   SKIP_GH=true ;;
-        --safe)    SAFE_MODE=true ;;
-        --rebuild) REBUILD=true ;;
-        *)         FORWARD_ARGS+=("$arg") ;;
+        --no-gh)    SKIP_GH=true ;;
+        --safe)     SAFE_MODE=true ;;
+        --rebuild)  REBUILD=true ;;
+        --lockdown) LOCKDOWN=true ;;
+        --no-limits) NO_LIMITS=true ;;
+        *)          FORWARD_ARGS+=("$arg") ;;
     esac
 done
 
@@ -56,6 +74,45 @@ if [ "$SKIP_GH" = false ]; then
     fi
 fi
 
+# ── Lockdown: ensure shared egress network + proxy are up ─────────────────────
+# The proxy is dual-homed: it has access to the real internet AND the internal
+# claude-egress network. Sandbox containers attach ONLY to claude-egress, which
+# has no NAT route to the internet — so the proxy is the ONLY egress path.
+# An agent that ignores the proxy env vars has nowhere to send packets.
+if [ "$LOCKDOWN" = true ]; then
+    EGRESS_NETWORK="claude-egress"
+    EGRESS_PROXY="claude-egress-proxy"
+    SQUID_IMAGE="ubuntu/squid:latest"
+
+    # Create the internal network (no internet route) if it doesn't exist
+    if ! docker network inspect "$EGRESS_NETWORK" > /dev/null 2>&1; then
+        echo "🔒 Creating internal egress network: $EGRESS_NETWORK"
+        docker network create --internal "$EGRESS_NETWORK" > /dev/null
+    fi
+
+    # Start the shared proxy if it's not running
+    if ! docker ps -q -f "name=^/${EGRESS_PROXY}$" | grep -q .; then
+        # Remove any stopped container with the same name
+        if docker ps -aq -f "name=^/${EGRESS_PROXY}$" | grep -q .; then
+            docker rm "$EGRESS_PROXY" > /dev/null
+        fi
+        echo "🔒 Starting egress proxy: $EGRESS_PROXY"
+        docker run -d \
+            --name "$EGRESS_PROXY" \
+            --network "$EGRESS_NETWORK" \
+            --cap-drop=ALL \
+            --security-opt=no-new-privileges:true \
+            --read-only \
+            --tmpfs /var/log/squid:uid=13,gid=13 \
+            --tmpfs /var/spool/squid:uid=13,gid=13 \
+            --tmpfs /run:uid=13,gid=13 \
+            -v "$SCRIPT_DIR/egress-allowlist.conf:/etc/squid/conf.d/allowlist.conf:ro" \
+            "$SQUID_IMAGE" > /dev/null
+        # Also attach the proxy to the default bridge so it can reach the internet
+        docker network connect bridge "$EGRESS_PROXY" 2>/dev/null || true
+    fi
+fi
+
 # ── Boot the container if it's not already running ────────────────────────────
 if ! docker ps -q -f "name=^/${CONTAINER_NAME}$" > /dev/null 2>&1 || \
    [ -z "$(docker ps -q -f "name=^/${CONTAINER_NAME}$")" ]; then
@@ -80,6 +137,11 @@ if ! docker ps -q -f "name=^/${CONTAINER_NAME}$" > /dev/null 2>&1 || \
         --tmpfs "/home/sandbox:exec,uid=$(id -u),gid=$(id -g),mode=0700"
         --user "$(id -u):$(id -g)"
         -e HOME=/home/sandbox
+        # ── Resource limits (skipped under --no-limits) ───────────────────────
+        # pids-limit: stops fork bombs; high enough for parallel gradlew builds
+        # (Gradle daemon + workers + forked JVMs + threads all count as tasks).
+        # Override values with CLAUDED_PIDS_LIMIT, CLAUDED_MEMORY, CLAUDED_CPUS.
+        # ── Mounts ────────────────────────────────────────────────────────────
         # Mount only the current repo — host home is invisible
         -v "$(pwd):/workspace:z"
         # Share the real ~/.claude dir read-write so Claude reuses the existing
@@ -94,6 +156,28 @@ if ! docker ps -q -f "name=^/${CONTAINER_NAME}$" > /dev/null 2>&1 || \
 
     if [ "$SKIP_GH" = false ]; then
         DOCKER_RUN_OPTS+=(-e GH_TOKEN="$ACTIVE_GH_TOKEN")
+    fi
+
+    if [ "$NO_LIMITS" = false ]; then
+        DOCKER_RUN_OPTS+=(
+            --pids-limit="${CLAUDED_PIDS_LIMIT:-4096}"
+            --memory="${CLAUDED_MEMORY:-8g}"
+            # memory-swap omitted: Docker default is 2× --memory, giving swap headroom
+            # for spiky builds (e.g. parallel gradlew) without being unbounded.
+            --cpus="${CLAUDED_CPUS:-8}"
+        )
+    fi
+
+    # ── Lockdown network: attach to internal network and point at proxy ────────
+    # The container joins claude-egress (--internal, no NAT) and gets the proxy
+    # in its env. No direct internet route exists — the proxy is the only path.
+    if [ "$LOCKDOWN" = true ]; then
+        DOCKER_RUN_OPTS+=(
+            --network=claude-egress
+            -e HTTPS_PROXY="http://claude-egress-proxy:3128"
+            -e HTTP_PROXY="http://claude-egress-proxy:3128"
+            -e NO_PROXY="localhost,127.0.0.1"
+        )
     fi
 
     docker run "${DOCKER_RUN_OPTS[@]}" claude-sandbox:latest tail -f /dev/null > /dev/null
