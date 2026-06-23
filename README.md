@@ -30,12 +30,18 @@ Because `~/.claude` is shared read-write, a full-auto Claude inside the box *can
 modify your host Claude config and history. This is intentional (no re-login), but
 it means the sandbox isn't fully isolated from your Claude state.
 
+## Requirements
+
+- Docker (running)
+- A Claude Code subscription (for `claude` login)
+- `gh` CLI authenticated on the host (optional, skip with `--no-gh`)
+
 ## Setup
 
 ### 1. Clone the repo
 
 ```sh
-git clone <repo-url> ~/work/docker-dev-sandbox
+git clone https://github.com/olbpetersson/docker-dev-sandbox ~/work/docker-dev-sandbox
 ```
 
 ### 2. Symlink `clauded` onto your PATH
