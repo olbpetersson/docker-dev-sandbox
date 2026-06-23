@@ -69,6 +69,7 @@ clauded [--no-gh] [--safe] [--rebuild] [--lockdown] [claude args...]
 | `--no-gh`     | Skip GitHub CLI token injection |
 | `--rebuild`   | Force a rebuild of the Docker image before starting |
 | `--lockdown`  | Restrict egress to an allowlist via a shared proxy |
+| `--no-limits` | Disable all resource limits (pids, memory, cpu) |
 
 Any additional arguments are passed through to `claude` unchanged.
 

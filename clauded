@@ -8,8 +8,10 @@
 #   --rebuild   force a docker image rebuild before starting
 #   --lockdown  route all container egress through an allowlist proxy;
 #               the container gets no direct internet route (--internal network)
+#   --no-limits disable all resource limits (pids, memory, cpu); useful when
+#               the defaults are too tight for an unusually heavy workload
 #
-# Resource limits (overridable via env vars):
+# Resource limits (overridable via env vars, ignored under --no-limits):
 #   CLAUDED_PIDS_LIMIT  max processes/threads  (default: 4096)
 #   CLAUDED_MEMORY      memory cap             (default: 8g)
 #   CLAUDED_CPUS        CPU quota              (default: 8)
@@ -29,6 +31,7 @@ SKIP_GH=false
 SAFE_MODE=false
 REBUILD=false
 LOCKDOWN=false
+NO_LIMITS=false
 FORWARD_ARGS=()
 
 for arg in "$@"; do
@@ -37,6 +40,7 @@ for arg in "$@"; do
         --safe)     SAFE_MODE=true ;;
         --rebuild)  REBUILD=true ;;
         --lockdown) LOCKDOWN=true ;;
+        --no-limits) NO_LIMITS=true ;;
         *)          FORWARD_ARGS+=("$arg") ;;
     esac
 done
@@ -133,15 +137,10 @@ if ! docker ps -q -f "name=^/${CONTAINER_NAME}$" > /dev/null 2>&1 || \
         --tmpfs "/home/sandbox:exec,uid=$(id -u),gid=$(id -g),mode=0700"
         --user "$(id -u):$(id -g)"
         -e HOME=/home/sandbox
-        # ── Resource limits ───────────────────────────────────────────────────
+        # ── Resource limits (skipped under --no-limits) ───────────────────────
         # pids-limit: stops fork bombs; high enough for parallel gradlew builds
         # (Gradle daemon + workers + forked JVMs + threads all count as tasks).
-        # Override with CLAUDED_PIDS_LIMIT, CLAUDED_MEMORY, CLAUDED_CPUS.
-        --pids-limit="${CLAUDED_PIDS_LIMIT:-4096}"
-        --memory="${CLAUDED_MEMORY:-8g}"
-        # memory-swap omitted: Docker default is 2× --memory, giving swap headroom
-        # for spiky builds (e.g. parallel gradlew) without being unbounded.
-        --cpus="${CLAUDED_CPUS:-8}"
+        # Override values with CLAUDED_PIDS_LIMIT, CLAUDED_MEMORY, CLAUDED_CPUS.
         # ── Mounts ────────────────────────────────────────────────────────────
         # Mount only the current repo — host home is invisible
         -v "$(pwd):/workspace:z"
@@ -157,6 +156,16 @@ if ! docker ps -q -f "name=^/${CONTAINER_NAME}$" > /dev/null 2>&1 || \
 
     if [ "$SKIP_GH" = false ]; then
         DOCKER_RUN_OPTS+=(-e GH_TOKEN="$ACTIVE_GH_TOKEN")
+    fi
+
+    if [ "$NO_LIMITS" = false ]; then
+        DOCKER_RUN_OPTS+=(
+            --pids-limit="${CLAUDED_PIDS_LIMIT:-4096}"
+            --memory="${CLAUDED_MEMORY:-8g}"
+            # memory-swap omitted: Docker default is 2× --memory, giving swap headroom
+            # for spiky builds (e.g. parallel gradlew) without being unbounded.
+            --cpus="${CLAUDED_CPUS:-8}"
+        )
     fi
 
     # ── Lockdown network: attach to internal network and point at proxy ────────
