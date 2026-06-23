@@ -12,7 +12,7 @@
 # Resource limits (overridable via env vars):
 #   CLAUDED_PIDS_LIMIT  max processes/threads  (default: 4096)
 #   CLAUDED_MEMORY      memory cap             (default: 8g)
-#   CLAUDED_CPUS        CPU quota              (default: 4)
+#   CLAUDED_CPUS        CPU quota              (default: 8)
 #
 # Lockdown proxy (shared across all lockdown sandboxes):
 #   Network:   claude-egress  (--internal Docker network)
@@ -139,9 +139,9 @@ if ! docker ps -q -f "name=^/${CONTAINER_NAME}$" > /dev/null 2>&1 || \
         # Override with CLAUDED_PIDS_LIMIT, CLAUDED_MEMORY, CLAUDED_CPUS.
         --pids-limit="${CLAUDED_PIDS_LIMIT:-4096}"
         --memory="${CLAUDED_MEMORY:-8g}"
-        # memory-swap == memory disables swap (prevents a leak from thrashing disk)
-        --memory-swap="${CLAUDED_MEMORY:-8g}"
-        --cpus="${CLAUDED_CPUS:-4}"
+        # memory-swap omitted: Docker default is 2× --memory, giving swap headroom
+        # for spiky builds (e.g. parallel gradlew) without being unbounded.
+        --cpus="${CLAUDED_CPUS:-8}"
         # ── Mounts ────────────────────────────────────────────────────────────
         # Mount only the current repo — host home is invisible
         -v "$(pwd):/workspace:z"

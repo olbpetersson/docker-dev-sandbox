@@ -90,14 +90,15 @@ By default every sandbox runs with these cgroup limits:
 |-------|---------|----------|
 | Process/thread cap | 4096 | `CLAUDED_PIDS_LIMIT=N` |
 | Memory | 8 GB | `CLAUDED_MEMORY=Ng` |
-| CPU | 4 cores | `CLAUDED_CPUS=N` |
+| CPU | 8 cores | `CLAUDED_CPUS=N` |
 
 The pids limit is high enough for a parallel `./gradlew build` (Gradle daemon +
 worker processes + forked test JVMs — threads count too). A fork bomb hits any
 limit instantly; legitimate builds rarely exceed a few thousand tasks.
 
-Setting `--memory-swap` equal to `--memory` disables swap, so a memory leak can't
-thrash host disk.
+Swap is enabled at Docker's default of 2× `--memory` (so 16 GB with an 8 GB
+memory cap). This gives spiky builds headroom to avoid OOM kills while still
+bounding total memory use.
 
 Override for a memory-hungry or CPU-heavy project:
 
