@@ -4,7 +4,7 @@
 # Usage: clauded [--no-gh] [--safe] [--rebuild] [claude args...]
 #
 #   --no-gh     skip GitHub CLI auth injection
-#   --safe      run Claude with normal permission prompts (default: full-auto)
+#   --safe      run Claude with normal permission prompts (default: auto-mode)
 #   --rebuild   force a docker image rebuild before starting
 
 set -e
@@ -111,5 +111,5 @@ docker exec "$CONTAINER_NAME" \
 if [ "$SAFE_MODE" = true ]; then
     exec docker exec -it "$CONTAINER_NAME" claude "${FORWARD_ARGS[@]}"
 else
-    exec docker exec -it "$CONTAINER_NAME" claude --dangerously-skip-permissions "${FORWARD_ARGS[@]}"
+    exec docker exec -it "$CONTAINER_NAME" claude --permission-mode auto "${FORWARD_ARGS[@]}"
 fi

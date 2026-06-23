@@ -60,7 +60,7 @@ clauded [--no-gh] [--safe] [--rebuild] [claude args...]
 
 | Flag        | Meaning |
 |-------------|---------|
-| _(none)_    | Full-auto Claude inside the sandbox |
+| _(none)_    | Auto-mode Claude inside the sandbox (`--permission-mode auto`) |
 | `--safe`    | Normal Claude with permission prompts (no `--dangerously-skip-permissions`) |
 | `--no-gh`   | Skip GitHub CLI token injection |
 | `--rebuild` | Force a rebuild of the Docker image before starting |
