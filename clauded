@@ -122,6 +122,10 @@ if ! docker ps -q -f "name=^/${CONTAINER_NAME}$" > /dev/null 2>&1 || \
         docker rm "$CONTAINER_NAME" > /dev/null
     fi
 
+    # Pre-create these files so Docker bind-mounts them as files, not directories.
+    mkdir -p "$HOME/.claude"
+    touch "$HOME/.claude/settings.json" "$HOME/.claude/settings.local.json" "$HOME/.claude.json" 2>/dev/null || true
+
     # Build docker run options array
     DOCKER_RUN_OPTS=(
         -d
@@ -145,11 +149,17 @@ if ! docker ps -q -f "name=^/${CONTAINER_NAME}$" > /dev/null 2>&1 || \
         # Mount only the current repo — host home is invisible
         -v "$(pwd):/workspace:z"
         # Share the real ~/.claude dir read-write so Claude reuses the existing
-        # login and persists sessions/history back to the host
-        # NOTE: :z (shared SELinux relabel) keeps the host's own Claude functional
+        # login and persists sessions/history back to the host.
+        # NOTE: :z (shared SELinux relabel) keeps the host's own Claude functional.
         -v "$HOME/.claude:/home/sandbox/.claude:z"
+        # Mount hook-execution config files read-only on top of the directory mount.
+        # A full-auto agent writing a hook into settings.json would get host RCE on the
+        # next non-sandboxed claude run; RO blocks the write while ~/.claude/projects/
+        # (history, sessions) remains writable via the parent directory mount above.
+        -v "$HOME/.claude/settings.json:/home/sandbox/.claude/settings.json:ro,z"
+        -v "$HOME/.claude/settings.local.json:/home/sandbox/.claude/settings.local.json:ro,z"
         # ~/.claude.json (main onboarding config, lives in $HOME not inside .claude/)
-        -v "$HOME/.claude.json:/home/sandbox/.claude.json:z"
+        -v "$HOME/.claude.json:/home/sandbox/.claude.json:ro,z"
         # Git identity — read-only
         -v "$HOME/.gitconfig:/home/sandbox/.gitconfig:ro,z"
     )
