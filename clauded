@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 
 # clauded — run Claude Code in an isolated Docker sandbox
-# Usage: clauded [--no-gh] [--safe] [--rebuild] [--lockdown] [claude args...]
+# Usage: clauded [--no-gh] [--safe] [--rebuild] [--lockdown] [--work-root] [claude args...]
 #
-#   --no-gh     skip GitHub CLI auth injection
-#   --safe      run Claude with normal permission prompts (default: auto-mode)
-#   --rebuild   force a docker image rebuild before starting
-#   --lockdown  route all container egress through an allowlist proxy;
-#               the container gets no direct internet route (--internal network)
-#   --no-limits disable all resource limits (pids, memory, cpu); useful when
-#               the defaults are too tight for an unusually heavy workload
+#   --no-gh      skip GitHub CLI auth injection
+#   --safe       run Claude with normal permission prompts (default: auto-mode)
+#   --rebuild    force a docker image rebuild before starting
+#   --lockdown   route all container egress through an allowlist proxy;
+#                the container gets no direct internet route (--internal network)
+#   --no-limits  disable all resource limits (pids, memory, cpu); useful when
+#                the defaults are too tight for an unusually heavy workload
+#   --work-root  mount the entire work root instead of just the current repo,
+#                so Claude can reference sibling repos. Requires CLAUDED_WORK_ROOT
+#                to be set in the environment (e.g. export CLAUDED_WORK_ROOT=$HOME/work).
+#                The container starts in the directory you were in, relative to the
+#                work root. A single shared container is reused for the whole tree.
 #
 # Resource limits (overridable via env vars, ignored under --no-limits):
 #   CLAUDED_PIDS_LIMIT  max processes/threads  (default: 4096)
@@ -32,18 +37,51 @@ SAFE_MODE=false
 REBUILD=false
 LOCKDOWN=false
 NO_LIMITS=false
+USE_WORK_ROOT=false
 FORWARD_ARGS=()
 
 for arg in "$@"; do
     case "$arg" in
-        --no-gh)    SKIP_GH=true ;;
-        --safe)     SAFE_MODE=true ;;
-        --rebuild)  REBUILD=true ;;
-        --lockdown) LOCKDOWN=true ;;
+        --no-gh)     SKIP_GH=true ;;
+        --safe)      SAFE_MODE=true ;;
+        --rebuild)   REBUILD=true ;;
+        --lockdown)  LOCKDOWN=true ;;
         --no-limits) NO_LIMITS=true ;;
-        *)          FORWARD_ARGS+=("$arg") ;;
+        --work-root) USE_WORK_ROOT=true ;;
+        *)           FORWARD_ARGS+=("$arg") ;;
     esac
 done
+
+# ── Resolve mount root and working directory inside the container ─────────────
+MOUNT_HOST="$(pwd)"
+MOUNT_CONTAINER="/workspace"
+CONTAINER_WORKDIR="/workspace"
+
+if [ "$USE_WORK_ROOT" = true ]; then
+    if [ -z "${CLAUDED_WORK_ROOT:-}" ]; then
+        echo "❌  Error: --work-root requires CLAUDED_WORK_ROOT to be set."
+        echo "Add this to your shell profile and re-open your terminal:"
+        echo "  export CLAUDED_WORK_ROOT=\$HOME/work"
+        exit 1
+    fi
+    WORK_ROOT="${CLAUDED_WORK_ROOT%/}"  # strip any trailing slash
+    CWD="$(pwd)"
+    if [[ "$CWD" != "$WORK_ROOT"/* && "$CWD" != "$WORK_ROOT" ]]; then
+        echo "❌  Error: current directory is not under CLAUDED_WORK_ROOT."
+        echo "  cwd:       $CWD"
+        echo "  work root: $WORK_ROOT"
+        exit 1
+    fi
+    REL_PATH="${CWD#"$WORK_ROOT"}"
+    REL_PATH="${REL_PATH#/}"  # strip leading slash
+    MOUNT_HOST="$WORK_ROOT"
+    MOUNT_CONTAINER="/work"
+    CONTAINER_WORKDIR="/work${REL_PATH:+/$REL_PATH}"
+    # Stable container name for the whole work-root tree
+    DIR_NAME=$(basename "$WORK_ROOT")
+    DIR_HASH=$(echo -n "$WORK_ROOT" | md5sum | cut -c 1-8)
+    CONTAINER_NAME="${DIR_NAME}-${DIR_HASH}-sandbox"
+fi
 
 # ── Build the image if it's missing or --rebuild was requested ─────────────────
 if [ "$REBUILD" = true ] || ! docker image inspect claude-sandbox:latest > /dev/null 2>&1; then
@@ -52,9 +90,12 @@ if [ "$REBUILD" = true ] || ! docker image inspect claude-sandbox:latest > /dev/
 fi
 
 # ── Generate a readable, collision-free container name from the cwd ────────────
-DIR_NAME=$(basename "$(pwd)")
-DIR_HASH=$(echo -n "$(pwd)" | md5sum | cut -c 1-8)
-CONTAINER_NAME="${DIR_NAME}-${DIR_HASH}-sandbox"
+# (skipped when --work-root is used — CONTAINER_NAME is already set above)
+if [ "$USE_WORK_ROOT" = false ]; then
+    DIR_NAME=$(basename "$(pwd)")
+    DIR_HASH=$(echo -n "$(pwd)" | md5sum | cut -c 1-8)
+    CONTAINER_NAME="${DIR_NAME}-${DIR_HASH}-sandbox"
+fi
 
 # ── On --rebuild, stop and remove any running container so the new image is used
 if [ "$REBUILD" = true ]; then
@@ -142,8 +183,8 @@ if ! docker ps -q -f "name=^/${CONTAINER_NAME}$" > /dev/null 2>&1 || \
         # (Gradle daemon + workers + forked JVMs + threads all count as tasks).
         # Override values with CLAUDED_PIDS_LIMIT, CLAUDED_MEMORY, CLAUDED_CPUS.
         # ── Mounts ────────────────────────────────────────────────────────────
-        # Mount only the current repo — host home is invisible
-        -v "$(pwd):/workspace:z"
+        # Default: current repo only. With --work-root: the full work tree.
+        -v "$MOUNT_HOST:$MOUNT_CONTAINER:z"
         # Share the real ~/.claude dir read-write so Claude reuses the existing
         # login and persists sessions/history back to the host
         # NOTE: :z (shared SELinux relabel) keeps the host's own Claude functional
@@ -193,7 +234,7 @@ docker exec "$CONTAINER_NAME" \
 
 # ── Exec into the container ────────────────────────────────────────────────────
 if [ "$SAFE_MODE" = true ]; then
-    exec docker exec -it "$CONTAINER_NAME" claude "${FORWARD_ARGS[@]}"
+    exec docker exec -it -w "$CONTAINER_WORKDIR" "$CONTAINER_NAME" claude "${FORWARD_ARGS[@]}"
 else
-    exec docker exec -it "$CONTAINER_NAME" claude --permission-mode auto "${FORWARD_ARGS[@]}"
+    exec docker exec -it -w "$CONTAINER_WORKDIR" "$CONTAINER_NAME" claude --permission-mode auto "${FORWARD_ARGS[@]}"
 fi
