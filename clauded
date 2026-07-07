@@ -10,9 +10,10 @@
 #                the container gets no direct internet route (--internal network)
 #   --no-limits  disable all resource limits (pids, memory, cpu); useful when
 #                the defaults are too tight for an unusually heavy workload
-#   --work-root  mount the entire work root instead of just the current repo,
-#                so Claude can reference sibling repos. Requires CLAUDED_WORK_ROOT
-#                to be set in the environment (e.g. export CLAUDED_WORK_ROOT=$HOME/work).
+#   --work-root [path]
+#                mount the entire work root instead of just the current repo,
+#                so Claude can reference sibling repos. Work root is resolved in
+#                order: (1) path argument, (2) $CLAUDED_WORK_ROOT env var, (3) error.
 #                The container starts in the directory you were in, relative to the
 #                work root. A single shared container is reused for the whole tree.
 #
@@ -38,18 +39,30 @@ REBUILD=false
 LOCKDOWN=false
 NO_LIMITS=false
 USE_WORK_ROOT=false
+WORK_ROOT_ARG=""
 FORWARD_ARGS=()
 
-for arg in "$@"; do
+i=1
+while [ $i -le $# ]; do
+    arg="${!i}"
     case "$arg" in
         --no-gh)     SKIP_GH=true ;;
         --safe)      SAFE_MODE=true ;;
         --rebuild)   REBUILD=true ;;
         --lockdown)  LOCKDOWN=true ;;
         --no-limits) NO_LIMITS=true ;;
-        --work-root) USE_WORK_ROOT=true ;;
+        --work-root)
+            USE_WORK_ROOT=true
+            next=$((i+1))
+            next_arg="${!next:-}"
+            if [ -n "$next_arg" ] && [[ "$next_arg" != --* ]]; then
+                WORK_ROOT_ARG="$next_arg"
+                i=$next
+            fi
+            ;;
         *)           FORWARD_ARGS+=("$arg") ;;
     esac
+    i=$((i+1))
 done
 
 # ── Resolve mount root and working directory inside the container ─────────────
@@ -58,13 +71,16 @@ MOUNT_CONTAINER="/workspace"
 CONTAINER_WORKDIR="/workspace"
 
 if [ "$USE_WORK_ROOT" = true ]; then
-    if [ -z "${CLAUDED_WORK_ROOT:-}" ]; then
-        echo "❌  Error: --work-root requires CLAUDED_WORK_ROOT to be set."
-        echo "Add this to your shell profile and re-open your terminal:"
-        echo "  export CLAUDED_WORK_ROOT=\$HOME/work"
+    if [ -n "$WORK_ROOT_ARG" ]; then
+        WORK_ROOT="${WORK_ROOT_ARG%/}"
+    elif [ -n "${CLAUDED_WORK_ROOT:-}" ]; then
+        WORK_ROOT="${CLAUDED_WORK_ROOT%/}"
+    else
+        echo "❌  Error: --work-root requires a path argument or CLAUDED_WORK_ROOT to be set."
+        echo "Pass a path directly:    clauded --work-root ~/work"
+        echo "Or set the env var:      export CLAUDED_WORK_ROOT=\$HOME/work"
         exit 1
     fi
-    WORK_ROOT="${CLAUDED_WORK_ROOT%/}"  # strip any trailing slash
     CWD="$(pwd)"
     if [[ "$CWD" != "$WORK_ROOT"/* && "$CWD" != "$WORK_ROOT" ]]; then
         echo "❌  Error: current directory is not under CLAUDED_WORK_ROOT."
