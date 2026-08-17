@@ -34,8 +34,9 @@ RUN curl -fsSL https://packages.adoptium.net/artifactory/api/gpg/key/public \
 RUN npm install -g --prefix /usr/local @anthropic-ai/claude-code typescript
 
 # 4. Pre-create mount-point directories so they exist under a read-only rootfs.
-#    /home/sandbox is the runtime HOME (tmpfs); /workspace is the repo mount.
-RUN mkdir -p /home/sandbox /workspace && chmod 1777 /home/sandbox
+#    /home/sandbox is the runtime HOME (tmpfs); /workspace is the default repo
+#    mount; /work is used when --work-root mounts the full work tree.
+RUN mkdir -p /home/sandbox /workspace /work && chmod 1777 /home/sandbox
 
 WORKDIR /workspace
 CMD ["tail", "-f", "/dev/null"]
