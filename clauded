@@ -102,7 +102,9 @@ fi
 # ── Build the image if it's missing or --rebuild was requested ─────────────────
 if [ "$REBUILD" = true ] || ! docker image inspect claude-sandbox:latest > /dev/null 2>&1; then
     echo "🔨 Building claude-sandbox:latest …"
-    docker build -f "$SCRIPT_DIR/Dockerfile.claude" -t claude-sandbox:latest "$SCRIPT_DIR"
+    BUILD_OPTS=()
+    [ "$REBUILD" = true ] && BUILD_OPTS+=(--no-cache)
+    docker build "${BUILD_OPTS[@]}" -f "$SCRIPT_DIR/Dockerfile.claude" -t claude-sandbox:latest "$SCRIPT_DIR"
 fi
 
 # ── Generate a readable, collision-free container name from the cwd ────────────
